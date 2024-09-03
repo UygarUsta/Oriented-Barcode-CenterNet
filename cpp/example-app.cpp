@@ -256,10 +256,14 @@ int main() {
         return -1;
     }
 
+    bool image = false;
+
+
     std::string test_folder = "C:/Users/John/Desktop/rotated_barcode/roboflow_barcode/test/images/";
     float threshold = 0.2;
     bool half = false; // Set to true if you want to use half precision
 
+    if (image) {
     // Iterate through image files in the test folder
     for (const auto& entry : fs::directory_iterator(test_folder)) {
         if (entry.is_regular_file() && entry.path().extension() == ".jpg") {
@@ -323,6 +327,113 @@ int main() {
                 break;
             }
         }
+
+
+
+
+
+        }
+    }
+
+
+
+    else {
+
+        cv::VideoCapture cap(0);
+        cap.set(cv::CAP_PROP_FOURCC,1196444237);
+        cap.set(cv::CAP_PROP_FRAME_WIDTH,1280);
+        cap.set(cv::CAP_PROP_FRAME_HEIGHT,720);
+        cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3); //auto
+        cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1); //manual
+        //cap.set(cv::CAP_PROP_EXPOSURE,25);
+        cap.set(cv::CAP_PROP_EXPOSURE,-5);
+        cap.set(cv::CAP_PROP_FPS,30);
+
+        if (!cap.isOpened()) {
+            std::cerr << "Error opening webcam" << std::endl;
+            return -1;
+        }
+
+        while (true) {
+            cv::Mat frame;
+            cap >> frame;
+
+            cv::Mat image = frame.clone();
+
+            // Preprocess the image
+            auto [resized_image, scale, left, top] = resize_and_pad(image);
+            cv::Mat img = resized_image.clone();
+            cv::Mat imgshow = img.clone();
+            img = Normalize()(img);
+
+            torch::Tensor tensor = torch::from_blob(img.data, {1, img.rows, img.cols, 3}, torch::kFloat).permute({0, 3, 1, 2});
+
+            if (half) {
+                tensor = tensor.to(torch::kCUDA).to(torch::kHalf); //.unsqueeze(0);
+            } else {
+                tensor = tensor.to(torch::kCUDA); //.unsqueeze(0);
+            }
+
+            // Perform inference
+            torch::NoGradGuard no_grad;
+
+            auto start_time = std::chrono::high_resolution_clock::now();
+            auto outputs = model.forward({tensor}).toTuple();
+            auto end_time = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> elapsed_seconds = end_time - start_time;
+            double fps = 1.0 / elapsed_seconds.count();
+
+
+
+            torch::Tensor hm = outputs->elements()[0].toTensor().to(torch::kCPU).squeeze(0);
+            torch::Tensor offset_tensor = outputs->elements()[1].toTensor().to(torch::kCPU).squeeze(0);
+            torch::Tensor wh_tensor = outputs->elements()[2].toTensor().to(torch::kCPU).squeeze(0);
+            torch::Tensor angle_tensor = outputs->elements()[3].toTensor().to(torch::kCPU).squeeze(0);
+
+
+            // Postprocess the outputs
+            hm = torch::sigmoid(hm);
+            cv::Mat hm_mat(hm.size(1), hm.size(2), CV_32F, hm[0].data_ptr<float>());
+            cv::Mat hm_mat_corner(hm.size(1), hm.size(2), CV_32F, hm[1].data_ptr<float>());
+
+
+            //cv::imshow("heatmap",hm_mat);
+            //cv::imshow("heatmap corner",hm_mat_corner);
+
+
+            hm_mat = select(hm_mat, threshold);
+
+
+
+            // Visualize the results
+            cv::Mat sample = showbox(imgshow, hm_mat, offset_tensor, wh_tensor, angle_tensor, threshold);
+            cv::putText(sample, "FPS: " + std::to_string(fps), cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+
+            cv::resize(hm_mat_corner,hm_mat_corner,cv::Size(512,512));
+            auto kpoints = pred4corner(hm_mat_corner,threshold);
+
+            for (auto element: kpoints) {
+
+                cv::circle(sample,cv::Point(element.x,element.y),5,cv::Scalar(255,255,255),-1);
+            }
+
+            cv::imshow("output", sample);
+
+            // Wait for a key press
+            char ch = cv::waitKey(1);
+            if (ch == 'q') {
+                cv::destroyAllWindows();
+                break;
+            }
+
+
+
+
+
+        }
+
+
+
     }
 
     return 0;
